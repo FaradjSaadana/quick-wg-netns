@@ -26,6 +26,7 @@ SAVE_CONFIG=0
 CONFIG_FILE=""
 PROGRAM="${0##*/}"
 ARGS=( "$@" )
+NET_NS=""
 
 cmd() {
 	echo "[#] $*" >&2
@@ -66,6 +67,7 @@ parse_options() {
 			PostUp) POST_UP+=( "$value" ); continue ;;
 			PostDown) POST_DOWN+=( "$value" ); continue ;;
 			SaveConfig) read_bool SAVE_CONFIG "$value"; continue ;;
+			NetworkNamespace) NET_NS="$value"; continue ;;
 			esac
 		fi
 		WG_CONFIG+="$line"$'\n'
@@ -85,6 +87,13 @@ auto_su() {
 	[[ $UID == 0 ]] || exec sudo -p "$PROGRAM must be run as root. Please enter the password for %u to continue: " -- "$BASH" -- "$SELF" "${ARGS[@]}"
 }
 
+add_netns() {
+	cmd ip netns add "$1"
+}
+
+del_netns() {
+	cmd ip net del "$1"
+}
 add_if() {
 	local ret
 	if ! cmd ip link add "$INTERFACE" type wireguard; then
@@ -327,7 +336,11 @@ cmd_up() {
 	local i
 	[[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
 	trap 'del_if; exit' INT TERM EXIT
+	if [[ -n $NET_NS ]]; then
+		add_netns $NET_NS
+	fi
 	add_if
+	# Will the pre up be executed in netns ? I think no
 	execute_hooks "${PRE_UP[@]}"
 	set_config
 	for i in "${ADDRESSES[@]}"; do
@@ -349,6 +362,7 @@ cmd_down() {
 	del_if
 	unset_dns || true
 	remove_firewall || true
+	del_netns $NET_NS
 	execute_hooks "${POST_DOWN[@]}"
 }
 
