@@ -92,8 +92,13 @@ add_netns() {
 }
 
 del_netns() {
-	cmd ip net del "$1"
+	cmd ip netns del "$1"
 }
+
+set_if_netns() {
+	cmd ip l set $INTERFACE netns "$1"
+}
+
 add_if() {
 	local ret
 	if ! cmd ip link add "$INTERFACE" type wireguard; then
@@ -126,28 +131,32 @@ del_if() {
 }
 
 add_addr() {
-	local proto=-4
+	local proto=-4 namespace_option=""
 	[[ $1 == *:* ]] && proto=-6
-	cmd ip $proto address add "$1" dev "$INTERFACE"
+	[[ -n $NET_NS ]] && namespace_option="-n $NET_NS"
+	cmd ip $namespace_option $proto address add "$1" dev "$INTERFACE"
 }
 
 set_mtu_up() {
-	local mtu=0 endpoint output
+	local mtu=0 endpoint output namespace_option="" namespace_exec=""
+	[[ -n $NET_NS ]] && namespace_option="-n $NET_NS" && namespace_exec="ip netns exec $NET_NS"
 	if [[ -n $MTU ]]; then
-		cmd ip link set mtu "$MTU" up dev "$INTERFACE"
+		cmd ip "$namespace_option" link set mtu "$MTU" up dev "$INTERFACE"
 		return
 	fi
 	while read -r _ endpoint; do
 		[[ $endpoint =~ ^\[?([a-z0-9:.]+)\]?:[0-9]+$ ]] || continue
-		output="$(ip route get "${BASH_REMATCH[1]}" || true)"
-		[[ ( $output =~ mtu\ ([0-9]+) || ( $output =~ dev\ ([^ ]+) && $(ip link show dev "${BASH_REMATCH[1]}") =~ mtu\ ([0-9]+) ) ) && ${BASH_REMATCH[1]} -gt $mtu ]] && mtu="${BASH_REMATCH[1]}"
-	done < <(wg show "$INTERFACE" endpoints)
+		output="$(ip $namespace_option route get "${BASH_REMATCH[1]}" || true)"
+		[[ ( $output =~ mtu\ ([0-9]+) || ( $output =~ dev\ ([^ ]+) && $(ip $namespace_option link show dev "${BASH_REMATCH[1]}") =~ mtu\ ([0-9]+) ) ) && ${BASH_REMATCH[1]} -gt $mtu ]] && mtu="${BASH_REMATCH[1]}"
+	done < <(eval "$namespace_exec" wg show "$INTERFACE" endpoints)
+	echo "YO2"
 	if [[ $mtu -eq 0 ]]; then
-		read -r output < <(ip route show default || true) || true
-		[[ ( $output =~ mtu\ ([0-9]+) || ( $output =~ dev\ ([^ ]+) && $(ip link show dev "${BASH_REMATCH[1]}") =~ mtu\ ([0-9]+) ) ) && ${BASH_REMATCH[1]} -gt $mtu ]] && mtu="${BASH_REMATCH[1]}"
+		read -r output < <(ip $namespace_option route show default || true) || true
+		[[ ( $output =~ mtu\ ([0-9]+) || ( $output =~ dev\ ([^ ]+) && $(ip $namespace_option link show dev "${BASH_REMATCH[1]}") =~ mtu\ ([0-9]+) ) ) && ${BASH_REMATCH[1]} -gt $mtu ]] && mtu="${BASH_REMATCH[1]}"
 	fi
+	echo "YO3"
 	[[ $mtu -gt 0 ]] || mtu=1500
-	cmd ip link set mtu $(( mtu - 80 )) up dev "$INTERFACE"
+	cmd ip $namespace_option link set mtu $(( mtu - 80 )) up dev "$INTERFACE"
 }
 
 resolvconf_iface_prefix() {
@@ -161,16 +170,20 @@ resolvconf_iface_prefix() {
 
 HAVE_SET_DNS=0
 set_dns() {
+	local namespace_exec=""
 	[[ ${#DNS[@]} -gt 0 ]] || return 0
+	[[ -n $NET_NS ]] && namespace_exec="ip netns exec $NET_NS"
 	{ printf 'nameserver %s\n' "${DNS[@]}"
 	  [[ ${#DNS_SEARCH[@]} -eq 0 ]] || printf 'search %s\n' "${DNS_SEARCH[*]}"
-	} | cmd resolvconf -a "$(resolvconf_iface_prefix)$INTERFACE" -m 0 -x
+	} | cmd $namespace_exec resolvconf -a "$(resolvconf_iface_prefix)$INTERFACE" -m 0 -x
 	HAVE_SET_DNS=1
 }
 
 unset_dns() {
+	local namespace_exec=""
 	[[ ${#DNS[@]} -gt 0 ]] || return 0
-	cmd resolvconf -d "$(resolvconf_iface_prefix)$INTERFACE" -f
+	[[ -n $NET_NS ]] && namespace_exec="ip netns exec $NET_NS"
+	cmd $namespace_exec resolvconf -d "$(resolvconf_iface_prefix)$INTERFACE" -f
 }
 
 add_route() {
@@ -336,13 +349,13 @@ cmd_up() {
 	local i
 	[[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
 	trap 'del_if; exit' INT TERM EXIT
-	if [[ -n $NET_NS ]]; then
-		add_netns $NET_NS
-	fi
 	add_if
-	# Will the pre up be executed in netns ? I think no
 	execute_hooks "${PRE_UP[@]}"
 	set_config
+	if [[ -n $NET_NS ]]; then
+		add_netns $NET_NS
+		set_if_netns $NET_NS
+	fi
 	for i in "${ADDRESSES[@]}"; do
 		add_addr "$i"
 	done
